@@ -1,14 +1,14 @@
 # Nursing Scheduler Agent
 
-An intelligent scheduling agent that generates optimal nursing schedules for healthcare facilities using constraint-based optimization and iterative refinement.
+An AI-powered scheduling agent that generates optimal nursing schedules for healthcare facilities using constraint-based optimization and iterative refinement.
 
-Given some number of employees and some number of patients with varying skill requirements, the agent:
-- Generates initial schedules using greedy heuristics
-- Validates against hard constraints (patient safety) and soft constraints (employee preferences)
+**Key Capabilities:**
+- Generates initial schedules using intelligent heuristics
+- Validates against hard constraints (patient safety) and soft constraints (employee preferences)  
 - Iteratively refines schedules to minimize violations
 - Provides actionable staffing recommendations
 
-Each patient requires 1-3 nurses per shift with specific skill levels. Each nurse can only care for one patient per shift. The agent prioritizes patient requirements while optimizing for cost, continuity of care, and employee satisfaction.
+**Scheduling Rules:** Each patient requires 1-3 nurses per shift with specific skill levels. Each nurse can only care for one patient per shift. The agent prioritizes patient safety while optimizing for cost, continuity of care, and employee satisfaction.
 
 ## 🚀 Quick Start
 
@@ -44,12 +44,27 @@ python3 --version
 make generate-data
 ```
 
-In the file you can set the number of employees and patients to randomly create. Default is 80 and 8.
+This creates random employee and patient data files. You can modify the numbers in `scripts/generate_data.py` (default: 80 employees, 8 patients).
 
 ### Run the Scheduler
 ```bash
 make agent
 ```
+
+## 💡 Example Usage
+
+```bash
+# 1. Generate test data (80 employees, 8 patients)
+make generate-data
+
+# 2. Run the scheduling agent
+make agent
+
+# 3. Visualize the generated schedule
+make visualize FILE=schedules/schedule_20251011_025615.json
+```
+
+The agent will interactively ask what you want to optimize and generate schedules accordingly.
 
 ### Run Tests
 ```bash
@@ -94,38 +109,13 @@ See `src/config.py` for complete configuration options.
 
 ### 5-Tool System
 
-The system uses a streamlined 5-tool architecture for optimal performance:
+The system uses a streamlined 5-tool architecture:
 
-1. **Constraint Validator** (`src/tools.py`)
-   - Validates hard constraints (coverage, skills, availability)
-   - Separates critical patient violations from employee optimizations
-   - Tracks violation types for targeted improvements
-   - Returns detailed violation categorization
-
-2. **Schedule Scorer** (`src/tools.py`)
-   - Multi-objective optimization (cost, continuity, fairness, overtime)
-   - Configurable weight system for different priorities
-   - Normalization for fair comparison across schedules
-   - Detailed component scoring breakdown
-
-3. **Schedule Generator** (`src/tools.py`)
-   - **Greedy Strategy**: Efficient initial schedule creation
-   - **Iterative Strategy**: Targeted improvement based on violations
-   - **Random Strategy**: Exploration for optimization
-   - 8-tier employee priority system with skill efficiency
-   - Team-aware skill waste and duplication penalties
-
-4. **Staffing Analyzer** (`src/tools.py`)
-   - Analyzes staffing needs based on violations and utilization
-   - Provides hiring/firing recommendations
-   - Tracks employee utilization patterns
-   - Identifies skill gaps and overstaffing
-
-5. **Schedule Comparator** (`src/tools.py`)
-   - Objective LLM-based schedule comparison
-   - Multi-criteria decision making
-   - Explains improvement rationale
-   - Supports iterative optimization
+1. **Constraint Validator** - Validates patient safety and coverage requirements
+2. **Schedule Scorer** - Multi-objective optimization (cost, continuity, fairness)  
+3. **Schedule Generator** - Creates schedules using greedy, iterative, or random strategies
+4. **Staffing Analyzer** - Provides hiring/firing recommendations and utilization analysis
+5. **Schedule Comparator** - LLM-based schedule comparison and improvement suggestions
 
 ### Core Agent (`src/agent.py`)
 - **Google Gemini Integration**: Uses Gemini 2.5 Flash with LangChain
@@ -205,4 +195,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - **Google Gemini**: Advanced AI capabilities for intelligent scheduling
 - **LangChain**: Framework for AI agent development
--**Claude AI**: Code generation
+- **Claude AI**: Code generation
