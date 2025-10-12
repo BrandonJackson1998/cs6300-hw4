@@ -51,7 +51,7 @@ This creates random employee and patient data files. You can modify the numbers 
 make agent
 ```
 
-## 💡 Example Usage
+### 💡 Example Usage
 
 ```bash
 # 1. Generate test data (80 employees, 8 patients)
@@ -66,7 +66,7 @@ make visualize FILE=schedules/schedule_20251011_025615.json
 
 The agent will interactively ask what you want to optimize and generate schedules accordingly.
 
-### Run Tests
+## Run Tests
 ```bash
 # Fast unit tests with mocked dependencies
 make test-unit
