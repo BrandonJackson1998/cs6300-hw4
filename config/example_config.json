@@ -1,0 +1,49 @@
+{
+  "scheduling": {
+    "max_nurses_per_patient": 3,
+    "max_consecutive_shifts": 3,
+    "default_shift_duration_hours": 4,
+    "enable_skill_efficiency": true,
+    "skill_waste_penalty_weight": 2.0,
+    "skill_duplication_penalty_weight": 3.0,
+    "utilization_warning_threshold": 0.6,
+    "utilization_danger_threshold": 0.8,
+    "underutilization_bonus_weight": 1.5
+  },
+  "scoring": {
+    "cost_weight": 1.0,
+    "continuity_weight": 2.0,
+    "fairness_weight": 1.0,
+    "overtime_weight": 1.5,
+    "cost_normalization_factor": 1000.0,
+    "ideal_nurses_per_patient": 3.0,
+    "overtime_threshold_hours": 40.0
+  },
+  "api": {
+    "model_name": "gemini-2.5-flash",
+    "temperature": 0.0,
+    "calls_per_minute": 9,
+    "max_retries": 3,
+    "timeout_seconds": 30,
+    "enable_token_optimization": true,
+    "max_violations_in_prompt": 10
+  },
+  "monitoring": {
+    "enable_monitoring": true,
+    "log_directory": "logs",
+    "save_session_logs": true,
+    "print_realtime_status": true,
+    "quality_tracking_enabled": true
+  },
+  "generation": {
+    "default_strategy": "greedy",
+    "max_iterations": 10,
+    "convergence_patience": 3,
+    "target_patient_violations": 0,
+    "acceptable_employee_violations": 5,
+    "max_generation_time_seconds": 300.0
+  },
+  "employees_file": "data/employees.json",
+  "patients_file": "data/patients.json",
+  "config_file": "config/scheduler_config.json"
+}
