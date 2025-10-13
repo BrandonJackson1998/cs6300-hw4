@@ -400,7 +400,6 @@ FORMAT: Return your analysis as clean HTML with proper structure:
         content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', content)
         
         # Convert numbered lists to proper HTML
-        import re
         lines = content.split('\n')
         formatted_lines = []
         in_list = False
