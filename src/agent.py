@@ -91,7 +91,7 @@ def generate_staffing_narrative(violations, employees, patients, schedule):
             return None
         
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model="learnlm-2.0-flash-experimental",
             temperature=0.3,
             google_api_key=api_key
         )
@@ -135,11 +135,21 @@ def generate_staffing_narrative(violations, employees, patients, schedule):
             available = employee_availability_by_shift[shift_num]
             needed = patient_needs_by_shift[shift_num]
             violations_count = shift_violations[shift_num]
-            ratio = (available / needed * 100) if needed > 0 else 0
             
-            status = "✓ ADEQUATE" if ratio >= 100 else "⚠ UNDERSTAFFED" if ratio >= 70 else "🚨 CRITICAL"
+            # Calculate actual scheduled nurses for this shift
+            scheduled = 0
+            shift_prefix = f"S{shift_num}"
+            for shift_id, patient_assignments in schedule.items():
+                if shift_id.endswith(shift_prefix):
+                    for patient_id, employee_ids in patient_assignments.items():
+                        scheduled += len(employee_ids)
+            
+            ratio = (available / needed * 100) if needed > 0 else 0
+            coverage_ratio = (scheduled / needed * 100) if needed > 0 else 0
+            
+            status = "✓ ADEQUATE" if coverage_ratio >= 100 else "⚠ UNDERSTAFFED" if coverage_ratio >= 70 else "🚨 CRITICAL"
             shift_analysis.append(
-                f"  {shift_names[shift_num]}: {available} available / {needed} needed ({ratio:.0f}%) {status}"
+                f"  {shift_names[shift_num]}: {scheduled} scheduled / {needed} needed ({coverage_ratio:.0f}%) {status} | {available} available"
             )
             if violations_count > 0:
                 shift_analysis[-1] += f" - {violations_count} violations"
@@ -271,6 +281,10 @@ def generate_staffing_narrative(violations, employees, patients, schedule):
         level_violations = sum(1 for v in violations if 'requires level' in v.lower())
         coverage_violations = sum(1 for v in violations if 'needs care' in v.lower() or ('needs' in v.lower() and 'nurses but' in v.lower()))
         
+        # ===== TOTAL SHIFTS CONTEXT =====
+        total_shifts_available = sum(len(e.get('available_shifts', [])) for e in employees)
+        availability_violation_rate = (availability_violations / total_shifts_available * 100) if total_shifts_available > 0 else 0
+        
         # ===== OVERALL STATS =====
         total_patient_hours = sum(len(p.get('care_shifts', [])) * p.get('nurses_needed', 1) * 4 for p in patients) / 4
         total_employee_hours = sum(len(e.get('available_shifts', [])) * 4 for e in employees) / 4
@@ -290,6 +304,27 @@ FACILITY OVERVIEW:
 - Total Patients: {len(patients)}
 - Total Violations: {len(violations)} ({coverage_violations} coverage, {skill_violations} skill, {level_violations} level, {availability_violations} availability, {hour_violations} hours, {conflict_violations} conflicts)
 
+VIOLATION SEVERITY GUIDE:
+🔴 CRITICAL (Patient Safety/Legal Issues - Immediate Risk):
+  - Coverage violations ({coverage_violations}): Patients without required nurses - IMMEDIATE PATIENT SAFETY RISK
+  - Skill violations ({skill_violations}): Nurses lack required clinical skills - MEDICAL CARE COMPROMISED
+  - Level violations ({level_violations}): Nurses below required experience level - CARE QUALITY RISK
+  - Unknown patient/employee: System errors with invalid IDs - DATA INTEGRITY FAILURE
+  - Patient scheduled for unneeded care: Wrong care timing - OPERATIONAL FAILURE
+  - System errors (too many nurses per patient): Over maximum limits - RESOURCE WASTE
+
+🟡 MODERATE (Operational Issues - Business Impact):
+  - MAX HOURS EXCEEDED: Employees over legal weekly limits - LABOR LAW VIOLATION  
+  - Hour violations ({hour_violations}): Employees working over preferred but under max hours - BURNOUT RISK
+  - Minimum hours not met: Employees below preferred minimum - CONTRACT VIOLATION
+  - Conflict violations ({conflict_violations}): Incompatible employees working together - WORKPLACE DISRUPTION
+  - Load imbalance: Some employees idle while others overworked - INEFFICIENT RESOURCE USE
+  - Consecutive shift violations: More than 3 shifts in a row - EMPLOYEE WELLBEING RISK
+
+🟢 MINOR (Preference Issues - Non-urgent):  
+  - Availability violations ({availability_violations}): Nurses scheduled when not available - PREFERENCE ONLY
+    (Rate: {availability_violation_rate:.1f}% of {total_shifts_available} total shifts - {'HIGH' if availability_violation_rate > 20 else 'MODERATE' if availability_violation_rate > 10 else 'LOW'} impact)
+
 HOURS ANALYSIS:
 - Weekly patient care hours needed: {total_patient_hours:.0f}h
 - Weekly employee hours available: {total_employee_hours:.0f}h
@@ -307,25 +342,87 @@ EXPERIENCE LEVEL COMPOSITION:
 TASK: Write a comprehensive 4-paragraph analysis for facility leadership:
 
 Paragraph 1 - EXECUTIVE SUMMARY (3-4 sentences):
-With {len(violations)} total violations, provide an overall assessment. Is this schedule operationally viable? What's the single biggest issue? Is it a capacity problem (not enough total hours), a skill mismatch problem, a scheduling problem, or a mix?
+Using the violation severity guide above, assess schedule viability. Focus on CRITICAL violations (coverage/skill/level) as these affect patient safety. MODERATE violations create operational challenges. MINOR violations (hour preferences) are not urgent. Is this schedule operationally viable for patient care? What's the most serious issue?
 
 Paragraph 2 - SHIFT TIMING & AVAILABILITY ANALYSIS (4-5 sentences):
-Based on the shift-by-shift analysis above, which specific time blocks (morning/afternoon/evening/night) are overstaffed vs understaffed? Be specific about the 4-hour windows. Why is this happening - is it employee availability preferences or actual shortage? What operational changes could help (shift incentives, schedule adjustments)?
+Based on the shift-by-shift analysis above, which specific time blocks (morning/afternoon/evening/night) are adequately staffed vs understaffed? Focus on "scheduled vs needed" ratios for actual coverage. Also analyze the "available" numbers to identify strategic opportunities: which shifts have high employee availability (easy to fill) vs low availability (need hiring incentives)? For understaffed shifts, is the issue lack of available employees or poor scheduling efficiency? What operational changes could help (shift incentives for low-availability periods, better utilization of high-availability periods)?
 
 Paragraph 3 - SKILLS & EXPERIENCE COMPOSITION (4-5 sentences):
-Analyze the skill inventory. Which skills are we short on vs oversupplied? Are employees with rare skills being underutilized? Is our nurse level composition appropriate for patient acuity (e.g., too many Level 1s when patients need Level 3s, or vice versa - overqualified and expensive)? Should we retrain, reassign, or hire?
+Analyze the skill inventory with specific data. Quote exact coverage percentages from the analysis above (e.g., "Wound Care: X employees / Y shift-needs (Z% coverage)"). Identify the top 3 skill shortages and top 3 oversupplied skills with their specific numbers. For experience levels, use the qualified nurse counts (Level 3+ can work Level 1-2 assignments) and provide specific coverage ratios. Avoid vague terms like "significant shortages across all skills" - be precise about which skills are actually short vs adequate vs oversupplied. Should we retrain, reassign, or hire for specific skill gaps?
 
 Paragraph 4 - SPECIFIC HIRING RECOMMENDATIONS (4-6 action items):
 Provide concrete, prioritized hiring recommendations in this format:
 "1. [CRITICAL/HIGH/MEDIUM] Hire [NUMBER] [FULL-TIME/PART-TIME] Level [X] nurses with [SKILLS] for [SPECIFIC SHIFTS]"
 Base recommendations on the gaps identified above. Include rationale for each recommendation (which specific gap it addresses).
 
-Be direct, data-driven, and action-oriented. Use specific numbers and shift times. Prioritize patient safety and operational efficiency."""
+Be direct, data-driven, and action-oriented. Use specific numbers and shift times from the analysis provided above. Quote exact percentages and coverage ratios rather than vague terms like "significant shortages." If a skill shows 150% coverage, call it "oversupplied," not "short." Prioritize patient safety and operational efficiency.
+
+FORMAT: Return your analysis as clean HTML with proper structure:
+- Use <h3> tags for paragraph headings
+- Use <p> tags for paragraph content  
+- Use <ul> and <li> for recommendation lists
+- Use <strong> for emphasis on key metrics
+- Use color coding: <span style="color: #d73502"> for critical issues, <span style="color: #f57c00"> for moderate issues, <span style="color: #388e3c"> for positive findings
+- Include the robot emoji 🤖 in the title"""
 
         print("\n🤖 Generating comprehensive AI staffing narrative...")
         response = llm.invoke(context)
         print("✓ AI narrative generated successfully")
-        return response.content
+        
+        # Clean up the response content
+        content = response.content.strip()
+        
+        # Convert markdown-style headers to HTML with better styling
+        content = content.replace('**Paragraph 1 - EXECUTIVE SUMMARY**', '<h3 style="color: #2d3748; margin-top: 25px; margin-bottom: 15px;">📊 Executive Summary</h3>')
+        content = content.replace('**Paragraph 2 - SHIFT TIMING & AVAILABILITY ANALYSIS**', '<h3 style="color: #2d3748; margin-top: 25px; margin-bottom: 15px;">⏰ Shift Timing & Availability Analysis</h3>')
+        content = content.replace('**Paragraph 3 - SKILLS & EXPERIENCE COMPOSITION**', '<h3 style="color: #2d3748; margin-top: 25px; margin-bottom: 15px;">🎯 Skills & Experience Composition</h3>')
+        content = content.replace('**Paragraph 4 - SPECIFIC HIRING RECOMMENDATIONS**', '<h3 style="color: #2d3748; margin-top: 25px; margin-bottom: 15px;">📋 Specific Hiring Recommendations</h3>')
+        
+        # Convert numbered lists to proper HTML
+        import re
+        lines = content.split('\n')
+        formatted_lines = []
+        in_list = False
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                if in_list:
+                    formatted_lines.append('</ol>')
+                    in_list = False
+                formatted_lines.append('')
+                continue
+                
+            # Check if line starts with a number (numbered list)
+            if re.match(r'^\d+\.', line):
+                if not in_list:
+                    formatted_lines.append('<ol style="margin: 15px 0; padding-left: 20px;">')
+                    in_list = True
+                formatted_lines.append(f'<li style="margin: 8px 0; line-height: 1.5;">{line[line.find(".")+1:].strip()}</li>')
+            else:
+                if in_list:
+                    formatted_lines.append('</ol>')
+                    in_list = False
+                if line.startswith('<h3'):
+                    formatted_lines.append(line)
+                else:
+                    formatted_lines.append(f'<p style="margin: 12px 0; line-height: 1.6;">{line}</p>')
+        
+        if in_list:
+            formatted_lines.append('</ol>')
+        
+        content = '\n'.join(formatted_lines)
+        
+        # Simple wrapper with clean styling
+        html_content = f"""<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; max-width: 900px; margin: 0 auto;">
+<h2 style="color: #1a202c; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 20px; font-size: 24px;">🤖 AI Staffing Analysis & Recommendations</h2>
+<div style="background: #f8f9fa; padding: 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+{content}
+</div>
+<p style="text-align: center; color: #718096; font-size: 14px; margin-top: 15px; font-style: italic;">✨ Generated by AI during schedule optimization • Review recommendations with clinical leadership</p>
+</div>"""
+        
+        return html_content
         
     except Exception as e:
         print(f"⚠ Warning: Could not generate staffing narrative: {e}")
@@ -853,6 +950,13 @@ PHASE 3a - VERIFY SUCCESS:
 PHASE 3b - EMPLOYEE VIOLATION OPTIMIZATION (MANDATORY):
 Once patient_violations = 0, optimize employee violations:
 
+QUALITY CHECK DURING PHASE 3b:
+When comparing schedules, don't just look at violation counts.
+Check the validation breakdown:
+- IF max_hours violations > 20: Load imbalance problem  
+- IF availability violations > 100: Scheduling conflict problem
+- Prefer schedules with BALANCED violation types over concentrated ones
+
 REQUIRED STEPS (5-6 optimization rounds):
 1. generate_schedule(strategy='iterative')
 2. validate_schedule → get P and E counts
@@ -889,10 +993,13 @@ Key optimization priorities (in order):
    - Skill requirements met
    - Level requirements met
    - Exclusion rules (safety)
-2. MINIMIZE EMPLOYEE MAX_HOURS VIOLATIONS (important - employee wellbeing)
-   - Prefer employees under max_hours
-   - Allow exceeding max_hours if necessary for patient coverage
-   - Track overtime for cost/staffing decisions
+2. BALANCE WORKLOAD ACROSS ALL EMPLOYEES (critical for fairness)
+   - NEVER schedule anyone beyond their max_hours (hard safety limit)
+   - Strongly prefer underutilized employees (0-10h/week)
+   - Avoid concentrating work on few employees
+   - Goal: Every employee should work, none should exceed max capacity
+   - Target: 80% of employees working 70-100% of expected hours
+   - Red flags: Some at max_hours while others at 0h/week = BAD scheduling
 3. MINIMIZE OTHER EMPLOYEE VIOLATIONS (optimization targets)
    - Availability preferences
    - Min hours requirements

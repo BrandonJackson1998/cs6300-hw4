@@ -14,7 +14,7 @@ from typing import List, Dict
 import os
 
 # Configuration
-NUM_EMPLOYEES = 80  # Mix of full-time and part-time - enough for good coverage
+NUM_EMPLOYEES = 50  # Mix of full-time and part-time - enough for good coverage
 NUM_PATIENTS = 8    # Reasonable facility size
 SKILLS = [
     "Medication Administration",
@@ -45,37 +45,66 @@ def generate_all_shifts() -> List[str]:
             for shift in range(SHIFTS_PER_DAY)]
 
 def generate_employee_availability(weekly_hours: int) -> List[str]:
-    """Generate realistic availability based on weekly hours"""
+    """Generate realistic availability based on weekly hours.
+    
+    Ensures employees are available for 1.5-2.0x their target hours for flexibility.
+    """
     all_shifts = generate_all_shifts()
-    shifts_per_week = weekly_hours // 4
+    shifts_per_week = weekly_hours // 4  # Target shifts per week
     available = []
     weeks = 4
     
-    # INCREASED FLEXIBILITY: Employees available for more varied shifts
+    # TARGET: 1.5-2.0x availability ratio
+    target_ratio = random.uniform(1.5, 2.0)
+    target_shifts_per_week = int(shifts_per_week * target_ratio)
+    
     for week in range(weeks):
         week_start_day = week * 7 + 1
         
-        # MORE FLEXIBLE: Employees can work more shift types
-        preferred_shift_pattern = random.choice([
-            [2, 3],        # Day shifts
-            [3, 4],        # Afternoon/evening
-            [4, 5],        # Evening/night
-            [0, 1],        # Night shifts
-            [1, 2, 3],     # Morning to afternoon
-            [2, 3, 4],     # Day to evening (NEW)
-            [1, 2, 3, 4],  # Most of day (NEW - more flexible)
-        ])
+        # Shift patterns - weighted toward more flexible patterns for higher availability
+        if target_shifts_per_week >= 15:  # Full-time with high target
+            # Need very flexible patterns
+            preferred_shift_pattern = random.choices(
+                [[0, 1, 2, 3, 4, 5],  # All shifts (most flexible)
+                 [1, 2, 3, 4, 5],     # All except midnight
+                 [0, 1, 2, 3, 4],     # All except late night
+                 [2, 3, 4, 5],        # Day to night
+                 [1, 2, 3, 4]],       # Morning to evening
+                weights=[20, 25, 25, 15, 15]
+            )[0]
+        elif target_shifts_per_week >= 8:  # Part-time 20h or full-time with lower ratio
+            preferred_shift_pattern = random.choices(
+                [[1, 2, 3, 4],       # Most of day
+                 [2, 3, 4],          # Day to evening
+                 [1, 2, 3],          # Morning to afternoon
+                 [2, 3, 4, 5],       # Day to night
+                 [0, 1, 2, 3]],      # Night to afternoon
+                weights=[30, 25, 20, 15, 10]
+            )[0]
+        else:  # Part-time 12h
+            preferred_shift_pattern = random.choices(
+                [[2, 3, 4],          # Day to evening
+                 [1, 2, 3],          # Morning to afternoon
+                 [2, 3],             # Day shifts
+                 [3, 4]],            # Afternoon/evening
+                weights=[35, 30, 20, 15]
+            )[0]
         
-        # MORE DAYS: Available more days per week
-        available_days_in_week = random.sample(range(7), k=min(7, shifts_per_week + 3))  # +3 instead of +2
+        # Calculate days needed to hit target
+        shifts_per_pattern = len(preferred_shift_pattern)
+        days_needed = min(7, int(target_shifts_per_week / shifts_per_pattern) + 2)  # +2 for buffer
+        
+        # Select random days
+        available_days_in_week = random.sample(range(7), k=days_needed)
         week_shifts_added = 0
+        max_shifts_this_week = int(target_shifts_per_week * 1.2)  # Allow 20% buffer
         
         for day_offset in available_days_in_week:
             day = week_start_day + day_offset
             if day > DAYS:
                 break
             for shift in preferred_shift_pattern:
-                if week_shifts_added < shifts_per_week * 1.5:  # Allow 1.5x overscheduling for flexibility
+                if week_shifts_added < max_shifts_this_week:
                     available.append(generate_shift_id(day, shift))
                     week_shifts_added += 1
     

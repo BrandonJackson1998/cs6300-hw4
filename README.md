@@ -143,6 +143,8 @@ make test-all          # Complete test suite (32 tests)
 
 ## 📈 Visualization
 
+After running the agent, you can generate a basic text or HTML visualization of the schedule as described below.
+
 ### Generate Schedule Visualization
 ```bash
 # Text-based visualization

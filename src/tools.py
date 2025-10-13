@@ -194,6 +194,31 @@ class ConstraintValidator:
             violations.extend(consecutive_violations)
             employee_violations.extend(consecutive_violations)
         
+        # Check for extreme load imbalance (employees at 2x+ max while others at 0)
+        if employee_hours:
+            max_hours_worked = max(employee_hours.values())
+            min_hours_worked = min((h for h in employee_hours.values() if h > 0), default=0)
+            
+            # Flag employees working over their max
+            for emp_id, hours in employee_hours.items():
+                employee = self.employees[emp_id]
+                weekly = hours / 4
+                max_weekly = employee['max_hours_per_week']
+                
+                if weekly > max_weekly:
+                    v = f"MAX HOURS EXCEEDED: Employee {emp_id} ({employee['name']}) scheduled for {weekly:.1f}h/week (over their {employee['max_hours_per_week']}h max) - CAPACITY VIOLATION"
+                    violations.append(v)
+                    employee_violations.append(v)
+            
+            # Flag severe imbalance (some working 2x while others idle)
+            employees_working = len([h for h in employee_hours.values() if h > 0])
+            employees_idle = len(self.employees) - employees_working
+            
+            if employees_idle > len(self.employees) * 0.3:  # More than 30% idle
+                v = f"LOAD IMBALANCE: {employees_idle} employees ({employees_idle/len(self.employees)*100:.0f}%) have 0 hours while others are overworked"
+                violations.append(v)
+                employee_violations.append(v)
+        
         # Check all required patient shifts are covered (CRITICAL - patient safety)
         for patient_id, patient in self.patients.items():
             for shift_id in patient['care_shifts']:
@@ -512,42 +537,118 @@ class ScheduleGenerator:
                     already_assigned_to_patient=[]
                 ))
 
-                # Build team iteratively with skill optimization
+                # Build team with SMART level assignment: Only ONE nurse needs to meet level requirement
                 assigned = []
                 combined_skills = set()
                 max_level_in_team = 0
                 required_skills = set(patient.get('required_skills', []))
                 min_nurses = patient['nurses_needed']
+                min_level = patient.get('min_level', 1)
                 max_nurses = min(self.MAX_NURSES_PER_PATIENT, len(eligible))
 
-                # Iteratively build team, re-sorting after each addition
-                for team_size in range(max_nurses):
-                    if not eligible:
-                        break
+                # SMART TEAM BUILDING: 
+                # 1. Find ONE nurse who meets the level requirement
+                # 2. Fill remaining spots with lowest-level nurses available
+                
+                # Step 1: Find the BEST nurse who meets level requirement
+                level_qualified = [emp_id for emp_id in eligible 
+                                 if self.employees[emp_id]['level'] >= min_level]
+                
+                if not level_qualified:
+                    # No one meets level requirement - skip this patient
+                    continue
+                
+                # Sort level-qualified nurses by the same priority system (includes load balancing)
+                level_qualified.sort(key=lambda emp_id: self._employee_priority(
+                    emp_id, patient, employee_hours, patient_nurse_assignments,
+                    employee_hours_by_week,
+                    already_assigned_to_patient=[]
+                ))
+                primary_nurse = level_qualified[0]
+                
+                # Assign the primary level-qualified nurse
+                emp = self.employees[primary_nurse]
+                assigned.append(primary_nurse)
+                combined_skills.update(emp['skills'])
+                max_level_in_team = emp['level']
+                
+                # Step 2: Fill remaining spots with LOWEST level nurses (Level 1 preferred)
+                remaining_slots = min_nurses - 1  # -1 because we already assigned primary
+                
+                if remaining_slots > 0:
+                    # Get remaining eligible nurses (excluding the one we just assigned)
+                    remaining_eligible = [emp_id for emp_id in eligible if emp_id != primary_nurse]
                     
-                    # Re-sort based on current team composition
-                    eligible.sort(key=lambda emp_id: self._employee_priority(
+                    # Sort remaining nurses by the same priority system
+                    remaining_eligible.sort(key=lambda emp_id: self._employee_priority(
                         emp_id, patient, employee_hours, patient_nurse_assignments,
                         employee_hours_by_week,
                         already_assigned_to_patient=assigned
                     ))
                     
-                    # Pick best remaining employee
-                    best_emp = eligible.pop(0)
-                    emp = self.employees[best_emp]
-                    
-                    assigned.append(best_emp)
-                    combined_skills.update(emp['skills'])
-                    max_level_in_team = max(max_level_in_team, emp['level'])
-                    
-                    # Check if we can stop early (met all requirements)
-                    has_min_nurses = len(assigned) >= min_nurses
-                    has_min_level = max_level_in_team >= patient.get('min_level', 1)
-                    has_all_skills = not required_skills or required_skills.issubset(combined_skills)
-                    
-                    if has_min_nurses and has_min_level and has_all_skills:
-                        # All requirements met, don't add more nurses
-                        break
+                    # Assign filler nurses (with exclusion checking)
+                    for i in range(min(remaining_slots, len(remaining_eligible))):
+                        filler_nurse = remaining_eligible[i]
+                        
+                        # Check if this nurse has exclusions with any already assigned nurses
+                        has_conflict = False
+                        filler_emp = self.employees[filler_nurse]
+                        for already_assigned_emp_id in assigned:
+                            # Check both directions: A excludes B or B excludes A
+                            if (already_assigned_emp_id in filler_emp.get('excluded_employees', []) or
+                                filler_nurse in self.employees[already_assigned_emp_id].get('excluded_employees', [])):
+                                has_conflict = True
+                                break
+                        
+                        if not has_conflict:
+                            emp = self.employees[filler_nurse]
+                            assigned.append(filler_nurse)
+                            combined_skills.update(emp['skills'])
+                        # If there's a conflict, skip this nurse and try the next one
+                
+                # Step 3: Check if we need ONE more nurse for skill coverage (only if < max_nurses)
+                if len(assigned) < max_nurses:
+                    missing_skills = required_skills - combined_skills
+                    if missing_skills:
+                        # Find nurses who can cover missing skills
+                        skill_fillers = []
+                        for emp_id in eligible:
+                            if emp_id not in assigned:
+                                emp = self.employees[emp_id]
+                                emp_skills = set(emp['skills'])
+                                if emp_skills & missing_skills:  # Can cover some missing skills
+                                    skill_fillers.append(emp_id)
+                        
+                        if skill_fillers:
+                            # Pick the LOWEST level nurse who covers the most missing skills
+                            def skill_filler_priority(emp_id):
+                                emp = self.employees[emp_id]
+                                emp_skills = set(emp['skills'])
+                                skills_covered = len(emp_skills & missing_skills)
+                                hours_worked = employee_hours.get(emp_id, 0)
+                                return (-skills_covered, hours_worked, emp['level'])
+                            
+                            skill_fillers.sort(key=skill_filler_priority)
+                            
+                            # Find first skill filler without exclusion conflicts
+                            skill_nurse_added = False
+                            for skill_candidate in skill_fillers:
+                                # Check if this nurse has exclusions with any already assigned nurses
+                                has_conflict = False
+                                skill_emp = self.employees[skill_candidate]
+                                for already_assigned_emp_id in assigned:
+                                    # Check both directions: A excludes B or B excludes A
+                                    if (already_assigned_emp_id in skill_emp.get('excluded_employees', []) or
+                                        skill_candidate in self.employees[already_assigned_emp_id].get('excluded_employees', [])):
+                                        has_conflict = True
+                                        break
+                                
+                                if not has_conflict:
+                                    assigned.append(skill_candidate)
+                                    emp = self.employees[skill_candidate]
+                                    combined_skills.update(emp['skills'])
+                                    skill_nurse_added = True
+                                    break  # Found a good skill filler, stop looking
 
                 # Final verification
                 has_min_nurses = len(assigned) >= min_nurses
@@ -636,17 +737,40 @@ class ScheduleGenerator:
         budget_used_ratio = hours_worked / monthly_budget if monthly_budget > 0 else 0
         approaching_max_ratio = hours_worked / max_monthly if max_monthly > 0 else 0
 
-        # CRITICAL: Strong penalty if approaching max (reserve capacity for later shifts)
-        if approaching_max_ratio > 0.9:
-            overwork_penalty = 10000  # Almost at max - avoid unless desperate
-        elif approaching_max_ratio > 0.75:
-            overwork_penalty = 5000   # Getting high - prefer others
-        elif budget_used_ratio > 1.2:
-            overwork_penalty = 1000   # Over expected by 20%
-        elif budget_used_ratio > 1.0:
-            overwork_penalty = 100    # Over expected slightly
+        # LOAD BALANCING: Target expected_hours_per_week, respect min/max bounds
+        max_weekly = emp.get('max_hours_per_week', 40)
+        expected_weekly = emp.get('expected_hours_per_week', max_weekly)
+        min_weekly = emp.get('min_hours_per_week', expected_weekly * 0.8)
+        current_weekly = hours_worked / 4
+
+        # Calculate distance from expected hours (our TARGET)
+        hours_from_expected = current_weekly - expected_weekly
+        
+        # Priority: Aim for expected hours, respect min/max bounds
+        if current_weekly >= max_weekly:
+            # At max hours - extremely high penalty (desperate situations only)
+            overwork_penalty = 1000000
+        elif current_weekly > expected_weekly * 1.2:
+            # Well over expected - very high penalty
+            overwork_penalty = 50000 + (hours_from_expected * 5000)
+        elif current_weekly > expected_weekly:
+            # Over expected - penalty proportional to excess
+            overwork_penalty = hours_from_expected * 3000  # Increased penalty
+        elif current_weekly < min_weekly:
+            # Below minimum - very strong bonus to get them to min hours
+            underwork_bonus = (min_weekly - current_weekly) * 5000  # Much stronger bonus
+            overwork_penalty = -underwork_bonus
+        elif current_weekly < expected_weekly * 0.8:
+            # Well below expected - strong bonus
+            underwork_bonus = abs(hours_from_expected) * 2000  # Much stronger bonus
+            overwork_penalty = -underwork_bonus
+        elif current_weekly < expected_weekly * 0.9:
+            # Below expected but above min - moderate bonus
+            underwork_bonus = abs(hours_from_expected) * 1000  # Stronger bonus
+            overwork_penalty = -underwork_bonus
         else:
-            overwork_penalty = 0      # Within expected
+            # Close to expected hours - minimal penalty
+            overwork_penalty = abs(hours_from_expected) * 50
         
         # NEW: Calculate skill efficiency when building a TEAM
         skill_waste_penalty = 0
@@ -683,13 +807,13 @@ class ScheduleGenerator:
         
         return (
             is_new_nurse,                    # Priority 1: Prefer new nurses for continuity
-            -skill_overlap,                  # Priority 2: Prefer nurses with required skills
-            level_overqualified,             # Priority 3: Avoid overqualified (expensive)
-            skill_duplication_penalty,       # Priority 4: Avoid pure duplication
-            skill_waste_penalty,             # Priority 5: Minimize unused skills  
-            overwork_penalty,                # Priority 6: CRITICAL - Avoid exhausting employees early
+            overwork_penalty,                # Priority 2: CRITICAL - Load balancing (favor underutilized)
+            -skill_overlap,                  # Priority 3: Prefer nurses with required skills
+            level_overqualified,             # Priority 4: Avoid overqualified (expensive)
+            skill_duplication_penalty,       # Priority 5: Avoid pure duplication
+            skill_waste_penalty,             # Priority 6: Minimize unused skills  
             approaching_max_ratio,           # Priority 7: Prefer employees with more hours remaining
-            hours_worked,                    # Priority 8: Load balance
+            hours_worked,                    # Priority 8: Secondary load balance
             cost                             # Priority 9: Lower cost
         )
     
@@ -722,23 +846,21 @@ class ScheduleGenerator:
             if emp_id in patient['excluded_employees']:
                 continue
             
-            # Check hour limits (allow exceeding max, but penalize in priority)
-            # Don't hard-filter here - let priority function handle it
-            # This allows patient coverage even if it means overtime
+            # SAFETY: Never schedule beyond max_hours (strict hard limit)
+            total_hours = employee_hours[emp_id]
+            weekly_hours = total_hours / 4
+            absolute_max = employee['max_hours_per_week']  # max_hours is absolute ceiling
+            if weekly_hours + 1 > absolute_max:
+                continue  # Skip this employee - they're at max capacity
             
-            # Check consecutive shifts
-            if len(employee_shift_history[emp_id]) >= 2:
-                recent_shifts = employee_shift_history[emp_id][-2:]
-                if self._would_exceed_consecutive(recent_shifts, shift_id):
+            # Check consecutive shifts - look at more history to properly prevent 4+ consecutive
+            if len(employee_shift_history[emp_id]) >= 1:
+                # Check if adding this shift would exceed 3 consecutive shifts
+                if self._would_exceed_consecutive(employee_shift_history[emp_id], shift_id):
                     continue
             
-            # Check weekly balance - don't let any week exceed weekly target by more than 4 hours
-            week_num = self._get_week_number(shift_id)
-            weekly_target = employee['max_hours_per_week']
-            current_week_hours = employee_hours_by_week[emp_id][week_num]
-            
-            if current_week_hours + 4 > weekly_target + 4:  # Allow 4h buffer
-                continue
+            # Weekly balance is handled by priority function, not hard filter
+            # Don't exclude employees here - let them be considered
             
             eligible.append(emp_id)
         
@@ -747,20 +869,28 @@ class ScheduleGenerator:
         if not eligible:
             emergency_eligible = []
             for emp_id, employee in self.employees.items():
-                # Only check HARD exclusions
+                # Hard exclusions
+                if emp_id in exclude_employees:
+                    continue
                 if emp_id in patient['excluded_employees']:
                     continue
                 if patient_id in employee.get('excluded_patients', []):
                     continue
                 
-                # Don't check max_hours - patient coverage is more important
-                # Check if they can work this specific shift without violating consecutive limits
-                if len(employee_shift_history[emp_id]) >= 2:
-                    recent_shifts = employee_shift_history[emp_id][-2:]
-                    if self._would_exceed_consecutive(recent_shifts, shift_id):
-                        continue
+                # SAFETY: Even in emergency, don't schedule beyond max_hours
+                weekly_hours = employee_hours[emp_id] / 4
+                absolute_max = employee['max_hours_per_week']
+                if weekly_hours + 1 > absolute_max:
+                    continue
+                
+                # Check consecutive shifts - use comprehensive check
+                if self._would_exceed_consecutive(employee_shift_history[emp_id], shift_id):
+                    continue
                 
                 emergency_eligible.append(emp_id)
+            
+            # Sort emergency candidates by hours worked (prefer underutilized)
+            emergency_eligible.sort(key=lambda e: employee_hours.get(e, 0))
             
             if emergency_eligible:
                 print(f"🚨 Emergency override activated for shift {shift_id}: using {len(emergency_eligible)} near-max employees")
@@ -774,9 +904,9 @@ class ScheduleGenerator:
         
         return eligible
     
-    def _would_exceed_consecutive(self, recent_shifts: List[str], new_shift: str) -> bool:
-        """Check if adding new_shift would create 4+ consecutive shifts."""
-        if len(recent_shifts) < 2:
+    def _would_exceed_consecutive(self, shift_history: List[str], new_shift: str) -> bool:
+        """Comprehensive check to prevent more than 3 consecutive shifts."""
+        if not shift_history:
             return False
         
         def parse_shift(s):
@@ -784,16 +914,42 @@ class ScheduleGenerator:
             shift_num = int(s[4:])
             return (day, shift_num)
         
-        prev1 = parse_shift(recent_shifts[-1])
-        prev2 = parse_shift(recent_shifts[-2])
-        new = parse_shift(new_shift)
-        
-        # Simple heuristic: if all same day and sequential
-        if prev2[0] == prev1[0] == new[0]:
-            if new[1] == prev1[1] + 1 and prev1[1] == prev2[1] + 1:
+        def are_consecutive(shift1_str: str, shift2_str: str) -> bool:
+            """Check if two shifts are consecutive."""
+            s1 = parse_shift(shift1_str)
+            s2 = parse_shift(shift2_str)
+            
+            # Same day, sequential shifts
+            if s1[0] == s2[0] and s2[1] == s1[1] + 1:
                 return True
+            # Cross-day: last shift of day -> first shift of next day
+            elif s2[0] == s1[0] + 1 and s1[1] == 5 and s2[1] == 0:
+                return True
+            return False
         
-        return False
+        # Create a list including the new shift, sorted by chronological order
+        all_shifts = shift_history + [new_shift]
+        
+        # Sort shifts chronologically
+        def shift_sort_key(shift_str):
+            day, shift_num = parse_shift(shift_str)
+            return (day, shift_num)
+        
+        all_shifts.sort(key=shift_sort_key)
+        
+        # Count consecutive sequences
+        consecutive_count = 1
+        max_consecutive = 1
+        
+        for i in range(1, len(all_shifts)):
+            if are_consecutive(all_shifts[i-1], all_shifts[i]):
+                consecutive_count += 1
+                max_consecutive = max(max_consecutive, consecutive_count)
+            else:
+                consecutive_count = 1
+        
+        # Return True if adding this shift would exceed 3 consecutive
+        return max_consecutive > 3
     
     def _generate_random(self) -> Dict:
         """Random assignment (fallback to greedy)."""
@@ -837,17 +993,17 @@ class ScheduleGenerator:
                 if patient_id and shift_id:
                     uncovered_shifts.append((shift_id, patient_id))
             
-            elif "needs" in violation and "nurses" in violation and "but only" in violation:
+            elif "needs" in violation and "nurses minimum but only" in violation and "assigned for" in violation:
                 patient_id, shift_id, needed = self._parse_insufficient_violation(violation, schedule)
                 if patient_id and shift_id and needed > 0:
                     insufficient_shifts.append((shift_id, patient_id, needed))
             
-            elif "requires skills" in violation:
+            elif "requires skills" in violation and "but assigned nurses don't have them" in violation:
                 patient_id, shift_id = self._parse_skill_gap_violation(violation)
                 if patient_id and shift_id:
                     skill_gap_shifts.append((shift_id, patient_id))
             
-            elif "requires level" in violation:
+            elif "requires level" in violation and "but highest assigned is level" in violation:
                 patient_id, shift_id = self._parse_level_violation(violation)
                 if patient_id and shift_id:
                     # Treat level violations like skill gaps - need to rebuild team
@@ -900,29 +1056,40 @@ class ScheduleGenerator:
         # PASS 1: Try with available nurses only
         eligible = self._find_candidates_for_shift(
             shift_id, patient_id, employee_hours, shift_employee_assignments,
-            relax_availability=False
+            relax_availability=False, schedule=schedule
         )
         
-        team = self._build_optimal_team(eligible, patient, min_nurses)
+        team = self._build_optimal_team(eligible, patient, min_nurses, employee_hours)
         
         # PASS 2: Relax availability if needed
         if not self._team_is_valid(team, patient):
             eligible = self._find_candidates_for_shift(
                 shift_id, patient_id, employee_hours, shift_employee_assignments,
-                relax_availability=True
+                relax_availability=True, schedule=schedule
             )
-            team = self._build_optimal_team(eligible, patient, min_nurses)
+            team = self._build_optimal_team(eligible, patient, min_nurses, employee_hours)
         
         # PASS 3: Still relaxing availability only (hours remain hard constraint)
         if not self._team_is_valid(team, patient):
             eligible = self._find_candidates_for_shift(
                 shift_id, patient_id, employee_hours, shift_employee_assignments,
-                relax_availability=True
+                relax_availability=True, schedule=schedule
             )
-            team = self._build_optimal_team(eligible, patient, min_nurses)
+            team = self._build_optimal_team(eligible, patient, min_nurses, employee_hours)
         
         # PASS 4: DESPERATE - ignore almost everything except hard exclusions
         if not self._team_is_valid(team, patient):
+            # Need to rebuild employee_shift_history for consecutive checking
+            employee_shift_history = defaultdict(list)
+            for s_id, patients in schedule.items():
+                for p_id, emp_ids in patients.items():
+                    for emp_id in emp_ids:
+                        employee_shift_history[emp_id].append(s_id)
+            
+            # Sort each employee's shift history
+            for emp_id in employee_shift_history:
+                employee_shift_history[emp_id].sort(key=lambda s: (int(s[1:3]), int(s[4:])))
+            
             eligible = []
             for emp_id, emp in self.employees.items():
                 # Only check HARD constraints
@@ -932,9 +1099,21 @@ class ScheduleGenerator:
                     continue
                 if emp_id in patient['excluded_employees']:
                     continue
+                
+                # SAFETY: Even in desperate mode, don't exceed max_hours
+                total_hours = employee_hours[emp_id]
+                weekly_hours = total_hours / 4
+                absolute_max = emp['max_hours_per_week']
+                if weekly_hours + 1 > absolute_max:
+                    continue
+                
+                # SAFETY: Even in desperate mode, don't exceed 3 consecutive shifts
+                if self._would_exceed_consecutive(employee_shift_history[emp_id], shift_id):
+                    continue
+                
                 eligible.append(emp_id)
             
-            team = self._build_optimal_team(eligible, patient, min_nurses)
+            team = self._build_optimal_team(eligible, patient, min_nurses, employee_hours)
         
         # Assign if valid
         if self._team_is_valid(team, patient):
@@ -948,10 +1127,23 @@ class ScheduleGenerator:
 
     def _find_candidates_for_shift(self, shift_id: str, patient_id: str,
                                    employee_hours: Dict, shift_employee_assignments: Dict,
-                                   relax_availability: bool = False) -> List[str]:
+                                   relax_availability: bool = False,
+                                   schedule: Dict = None) -> List[str]:
         """Find candidate employees for a shift with optional constraint relaxation."""
         eligible = []
         patient = self.patients[patient_id]
+        
+        # Build employee shift history for consecutive checking
+        employee_shift_history = defaultdict(list)
+        if schedule:
+            for s_id, patients in schedule.items():
+                for p_id, emp_ids in patients.items():
+                    for emp_id in emp_ids:
+                        employee_shift_history[emp_id].append(s_id)
+            
+            # Sort each employee's shift history
+            for emp_id in employee_shift_history:
+                employee_shift_history[emp_id].sort(key=lambda s: (int(s[1:3]), int(s[4:])))
         
         for emp_id, emp in self.employees.items():
             # NEVER relax: Already assigned this shift
@@ -969,10 +1161,16 @@ class ScheduleGenerator:
                 if shift_id not in emp['available_shifts']:
                     continue
             
-            # Check max_hours as soft constraint - prefer not to exceed, but allow for patient coverage
-            # Note: We don't filter out employees over max_hours here
-            # The priority/sorting will prefer underutilized employees, but won't exclude overworked ones
-            # This ensures patient coverage is prioritized over employee hour preferences
+            # SAFETY: Never schedule beyond max_hours (strict hard limit)
+            total_hours = employee_hours[emp_id]
+            weekly_hours = total_hours / 4
+            absolute_max = emp['max_hours_per_week']
+            if weekly_hours + 1 > absolute_max:
+                continue  # Skip this employee - they're at max capacity
+            
+            # SAFETY: Never exceed 3 consecutive shifts
+            if self._would_exceed_consecutive(employee_shift_history[emp_id], shift_id):
+                continue
             
             eligible.append(emp_id)
         
@@ -981,44 +1179,119 @@ class ScheduleGenerator:
         
         return eligible
 
-    def _build_optimal_team(self, eligible: List[str], patient: Dict, min_nurses: int) -> List[str]:
-        """Build an optimal team from eligible employees."""
+    def _build_optimal_team(self, eligible: List[str], patient: Dict, min_nurses: int, employee_hours: Dict = None) -> List[str]:
+        """Build optimal team: ONE nurse meets level, others are lowest level possible."""
         if len(eligible) < min_nurses:
             return []
         
         team = []
         combined_skills = set()
-        max_level = 0
         required_skills = set(patient.get('required_skills', []))
         min_level = patient.get('min_level', 1)
         
-        # Strategy: Pick nurses that together cover all requirements
-        # Sort by usefulness for this patient
-        def nurse_value(emp_id):
+        if employee_hours is None:
+            employee_hours = {}
+        
+        # SMART TEAM BUILDING: Only ONE nurse needs to meet level requirement
+        
+        # Step 1: Find the BEST nurse who meets level requirement
+        level_qualified = [emp_id for emp_id in eligible 
+                         if self.employees[emp_id]['level'] >= min_level]
+        
+        if not level_qualified:
+            return []  # No one meets level requirement
+        
+        # Sort level-qualified nurses by: skills coverage, hours worked, prefer lowest qualifying level
+        def level_nurse_priority(emp_id):
             emp = self.employees[emp_id]
             emp_skills = set(emp['skills'])
-            new_skills = len((emp_skills & required_skills) - combined_skills)
-            meets_level = emp['level'] >= min_level
-            return (-meets_level, -new_skills, -emp['level'], len(emp_skills))
+            skill_coverage = len(emp_skills & required_skills)
+            hours_worked = employee_hours.get(emp_id, 0)
+            return (-skill_coverage, hours_worked, emp['level'])
         
-        # Greedy team building
-        for emp_id in sorted(eligible, key=nurse_value):
-            emp = self.employees[emp_id]
+        level_qualified.sort(key=level_nurse_priority)
+        primary_nurse = level_qualified[0]
+        
+        # Assign primary nurse
+        emp = self.employees[primary_nurse]
+        team.append(primary_nurse)
+        combined_skills.update(emp['skills'])
+        
+        # Step 2: Fill remaining spots with LOWEST level nurses
+        remaining_slots = min_nurses - 1
+        
+        if remaining_slots > 0:
+            remaining_eligible = [emp_id for emp_id in eligible if emp_id != primary_nurse]
             
-            team.append(emp_id)
-            combined_skills.update(emp['skills'])
-            max_level = max(max_level, emp['level'])
+            # Sort by: missing skills coverage, hours worked, then LOWEST level
+            def filler_priority(emp_id):
+                emp = self.employees[emp_id]
+                emp_skills = set(emp['skills'])
+                missing_skills = required_skills - combined_skills
+                new_skills = len(emp_skills & missing_skills)
+                hours_worked = employee_hours.get(emp_id, 0)
+                return (-new_skills, hours_worked, emp['level'])
             
-            # Check if requirements met
-            has_min_nurses = len(team) >= min_nurses
-            has_level = max_level >= min_level
-            has_skills = not required_skills or required_skills.issubset(combined_skills)
+            remaining_eligible.sort(key=filler_priority)
             
-            if has_min_nurses and has_level and has_skills:
-                break
-            
-            if len(team) >= self.MAX_NURSES_PER_PATIENT:
-                break
+            # Add filler nurses with exclusion checking
+            for candidate in remaining_eligible:
+                if len(team) >= min_nurses:
+                    break  # We have enough nurses
+                    
+                # Check if this nurse has exclusions with any already assigned nurses
+                has_conflict = False
+                candidate_emp = self.employees[candidate]
+                for already_assigned_emp_id in team:
+                    # Check both directions: A excludes B or B excludes A
+                    if (already_assigned_emp_id in candidate_emp.get('excluded_employees', []) or
+                        candidate in self.employees[already_assigned_emp_id].get('excluded_employees', [])):
+                        has_conflict = True
+                        break
+                
+                if not has_conflict:
+                    team.append(candidate)
+                    emp = self.employees[candidate]
+                    combined_skills.update(emp['skills'])
+        
+        # Step 3: Add one more nurse if needed for skills (up to max 3)
+        if len(team) < self.MAX_NURSES_PER_PATIENT:
+            missing_skills = required_skills - combined_skills
+            if missing_skills:
+                candidates = [emp_id for emp_id in eligible if emp_id not in team]
+                skill_candidates = []
+                
+                for emp_id in candidates:
+                    emp = self.employees[emp_id]
+                    emp_skills = set(emp['skills'])
+                    if emp_skills & missing_skills:
+                        skill_candidates.append(emp_id)
+                
+                if skill_candidates:
+                    def skill_priority(emp_id):
+                        emp = self.employees[emp_id]
+                        emp_skills = set(emp['skills'])
+                        skills_covered = len(emp_skills & missing_skills)
+                        hours_worked = employee_hours.get(emp_id, 0)
+                        return (-skills_covered, hours_worked, emp['level'])
+                    
+                    skill_candidates.sort(key=skill_priority)
+                    
+                    # Find first skill candidate without exclusion conflicts
+                    for skill_candidate in skill_candidates:
+                        # Check if this nurse has exclusions with any already assigned nurses
+                        has_conflict = False
+                        skill_emp = self.employees[skill_candidate]
+                        for already_assigned_emp_id in team:
+                            # Check both directions: A excludes B or B excludes A
+                            if (already_assigned_emp_id in skill_emp.get('excluded_employees', []) or
+                                skill_candidate in self.employees[already_assigned_emp_id].get('excluded_employees', [])):
+                                has_conflict = True
+                                break
+                        
+                        if not has_conflict:
+                            team.append(skill_candidate)
+                            break  # Found a good skill candidate, stop looking
         
         return team
 
@@ -1095,7 +1368,7 @@ class ScheduleGenerator:
         # Find additional nurses with relaxed constraints
         eligible = self._find_candidates_for_shift(
             shift_id, patient_id, employee_hours, shift_employee_assignments,
-            relax_availability=True
+            relax_availability=True, schedule=schedule
         )
         
         # Remove already assigned
@@ -1117,7 +1390,25 @@ class ScheduleGenerator:
                 return (-new_skills, employee_hours.get(emp_id, 0))
             
             eligible.sort(key=usefulness)
-            additional = eligible[:max_additional]
+            
+            # Add nurses with exclusion checking
+            additional = []
+            for candidate in eligible:
+                if len(additional) >= max_additional:
+                    break  # We have enough additional nurses
+                    
+                # Check if this nurse has exclusions with any current team members
+                has_conflict = False
+                candidate_emp = self.employees[candidate]
+                for current_emp_id in current_team:
+                    # Check both directions: A excludes B or B excludes A
+                    if (current_emp_id in candidate_emp.get('excluded_employees', []) or
+                        candidate in self.employees[current_emp_id].get('excluded_employees', [])):
+                        has_conflict = True
+                        break
+                
+                if not has_conflict:
+                    additional.append(candidate)
             
             schedule[shift_id][patient_id].extend(additional)
             

@@ -236,7 +236,7 @@ def create_html_visualization(schedule_file: str, output_file: str = "schedule_v
         max_hours = emp.get('max_hours_per_week', 40)
         expected_hours = emp.get('expected_hours_per_week', 40)
         
-        if avg_weekly > expected_hours * 0.95:  # Use expected hours for overworked detection
+        if avg_weekly > expected_hours:  # Anyone above expected hours is "overworked"
             overworked.append({
                 'id': emp_id,
                 'name': emp.get('name', emp_id),
