@@ -91,7 +91,7 @@ def generate_staffing_narrative(violations, employees, patients, schedule):
             return None
         
         llm = ChatGoogleGenerativeAI(
-            model="learnlm-2.0-flash-experimental",
+            model="gemini-2.5-flash",
             temperature=0.3,
             google_api_key=api_key
         )
@@ -157,13 +157,21 @@ def generate_staffing_narrative(violations, employees, patients, schedule):
         shift_analysis_text = '\n'.join(shift_analysis)
         
         # ===== SKILL ANALYSIS =====
-        # Count employee skills
-        employee_skills = defaultdict(int)
-        for emp in employees:
-            for skill in emp.get('skills', []):
-                employee_skills[skill] += 1
+        # Count available shifts by skill (preferred availability)
+        employee_skills_preferred = defaultdict(int)
+        employee_skills_maximum = defaultdict(int)
         
-        # Count patient skill requirements
+        for emp in employees:
+            # Preferred availability (when they want to work)
+            preferred_shifts_count = len(emp.get('available_shifts', []))
+            # Maximum availability (assuming 24/7 availability - 6 shifts per day * 28 days)
+            maximum_shifts_count = 6 * 28  # 168 total shifts per month
+            
+            for skill in emp.get('skills', []):
+                employee_skills_preferred[skill] += preferred_shifts_count
+                employee_skills_maximum[skill] += maximum_shifts_count
+        
+        # Count patient skill requirements (shifts needed)
         patient_skill_needs = defaultdict(int)
         for patient in patients:
             for skill in patient.get('required_skills', []):
@@ -183,43 +191,48 @@ def generate_staffing_narrative(violations, employees, patients, schedule):
         
         # Build skill analysis
         skill_analysis_lines = []
-        all_skills = set(employee_skills.keys()) | set(patient_skill_needs.keys())
+        all_skills = set(employee_skills_preferred.keys()) | set(patient_skill_needs.keys())
         
         for skill in sorted(all_skills):
-            emp_count = employee_skills[skill]
+            preferred_shifts = employee_skills_preferred[skill]
+            maximum_shifts = employee_skills_maximum[skill]
             need_count = patient_skill_needs[skill]
             gap_count = skill_gaps_from_violations[skill]
             
             if need_count > 0:
-                coverage = (emp_count / need_count * 100) if need_count > 0 else 0
+                preferred_coverage = (preferred_shifts / need_count * 100) if need_count > 0 else 0
+                maximum_coverage = (maximum_shifts / need_count * 100) if need_count > 0 else 0
+                
                 if gap_count > 0:
                     skill_analysis_lines.append(
-                        f"  🚨 {skill}: {emp_count} employees / {need_count} shift-needs ({coverage:.0f}% coverage) - {gap_count} gaps in schedule"
+                        f"  🚨 {skill}: {preferred_shifts} preferred available-shifts / {need_count} shift-needs ({preferred_coverage:.0f}% coverage) | Max capacity: {maximum_shifts} shifts ({maximum_coverage:.0f}%) - {gap_count} gaps in schedule"
                     )
-                elif coverage < 50:
+                elif preferred_coverage < 50:
                     skill_analysis_lines.append(
-                        f"  ⚠ {skill}: {emp_count} employees / {need_count} shift-needs ({coverage:.0f}% coverage) - LOW"
+                        f"  ⚠ {skill}: {preferred_shifts} preferred available-shifts / {need_count} shift-needs ({preferred_coverage:.0f}% coverage) | Max capacity: {maximum_shifts} shifts ({maximum_coverage:.0f}%) - LOW"
                     )
-                elif coverage >= 150:
+                elif preferred_coverage >= 150:
                     skill_analysis_lines.append(
-                        f"  ✓ {skill}: {emp_count} employees / {need_count} shift-needs ({coverage:.0f}% coverage) - OVERSUPPLIED"
+                        f"  ✓ {skill}: {preferred_shifts} preferred available-shifts / {need_count} shift-needs ({preferred_coverage:.0f}% coverage) | Max capacity: {maximum_shifts} shifts ({maximum_coverage:.0f}%) - OVERSUPPLIED"
                     )
                 else:
                     skill_analysis_lines.append(
-                        f"  ✓ {skill}: {emp_count} employees / {need_count} shift-needs ({coverage:.0f}% coverage) - ADEQUATE"
+                        f"  ✓ {skill}: {preferred_shifts} preferred available-shifts / {need_count} shift-needs ({preferred_coverage:.0f}% coverage) | Max capacity: {maximum_shifts} shifts ({maximum_coverage:.0f}%) - ADEQUATE"
                     )
-            elif emp_count > 0:
+            elif preferred_shifts > 0:
                 skill_analysis_lines.append(
-                    f"  ℹ {skill}: {emp_count} employees but NOT REQUIRED by any patient - consider reassignment"
+                    f"  ℹ {skill}: {preferred_shifts} preferred available-shifts but NOT REQUIRED by any patient - consider reassignment"
                 )
         
         skill_analysis_text = '\n'.join(skill_analysis_lines) if skill_analysis_lines else "  - No skill data available"
         
         # ===== LEVEL ANALYSIS =====
-        # Count employees by level
-        employee_levels = defaultdict(int)
+        # Count available shifts by level (not just employees)
+        employee_level_shifts = defaultdict(int)
         for emp in employees:
-            employee_levels[emp.get('level', 1)] += 1
+            level = emp.get('level', 1)
+            available_shifts = len(emp.get('available_shifts', []))
+            employee_level_shifts[level] += available_shifts
         
         # Count patient level requirements
         patient_level_needs = defaultdict(int)
@@ -239,36 +252,36 @@ def generate_staffing_narrative(violations, employees, patients, schedule):
         
         # Build level analysis
         level_analysis_lines = []
-        for level in sorted(set(employee_levels.keys()) | set(patient_level_needs.keys())):
-            emp_count = employee_levels[level]
+        for level in sorted(set(employee_level_shifts.keys()) | set(patient_level_needs.keys())):
+            level_shifts = employee_level_shifts[level]
             need_count = patient_level_needs.get(level, 0)
             gap_count = level_gaps_from_violations[level]
             
             # For level requirements, Level 3 can cover Level 2 and 1, etc.
-            # So we need to count "qualified" nurses
-            qualified_count = sum(employee_levels[l] for l in employee_levels if l >= level)
+            # So we need to count "qualified" nurse available-shifts
+            qualified_shifts = sum(employee_level_shifts[l] for l in employee_level_shifts if l >= level)
             
             if need_count > 0:
-                coverage = (qualified_count / need_count * 100) if need_count > 0 else 0
+                coverage = (qualified_shifts / need_count * 100) if need_count > 0 else 0
                 if gap_count > 0:
                     level_analysis_lines.append(
-                        f"  🚨 Level {level}+: {qualified_count} qualified nurses / {need_count} shift-needs ({coverage:.0f}% coverage) - {gap_count} gaps"
+                        f"  🚨 Level {level}+: {qualified_shifts} qualified available-shifts / {need_count} shift-needs ({coverage:.0f}% coverage) - {gap_count} gaps"
                     )
                 elif coverage < 50:
                     level_analysis_lines.append(
-                        f"  ⚠ Level {level}+: {qualified_count} qualified nurses / {need_count} shift-needs ({coverage:.0f}% coverage) - INSUFFICIENT"
+                        f"  ⚠ Level {level}+: {qualified_shifts} qualified available-shifts / {need_count} shift-needs ({coverage:.0f}% coverage) - INSUFFICIENT"
                     )
                 elif coverage >= 200:
                     level_analysis_lines.append(
-                        f"  ✓ Level {level}+: {qualified_count} qualified nurses / {need_count} shift-needs ({coverage:.0f}% coverage) - OVERQUALIFIED"
+                        f"  ✓ Level {level}+: {qualified_shifts} qualified available-shifts / {need_count} shift-needs ({coverage:.0f}% coverage) - OVERQUALIFIED"
                     )
                 else:
                     level_analysis_lines.append(
-                        f"  ✓ Level {level}+: {qualified_count} qualified nurses / {need_count} shift-needs ({coverage:.0f}% coverage) - ADEQUATE"
+                        f"  ✓ Level {level}+: {qualified_shifts} qualified available-shifts / {need_count} shift-needs ({coverage:.0f}% coverage) - ADEQUATE"
                     )
             else:
                 level_analysis_lines.append(
-                    f"  ℹ Level {level}: {emp_count} nurses but no patients require this level"
+                    f"  ℹ Level {level}: {level_shifts} available-shifts but no patients require this level"
                 )
         
         level_analysis_text = '\n'.join(level_analysis_lines) if level_analysis_lines else "  - No level data available"
@@ -333,7 +346,12 @@ HOURS ANALYSIS:
 SHIFT-BY-SHIFT STAFFING (Supply vs Demand):
 {shift_analysis_text}
 
-SKILL INVENTORY & GAPS:
+SKILL INVENTORY & GAPS (Dual Metrics Analysis):
+IMPORTANT: Each skill shows TWO metrics - preferred availability vs maximum theoretical capacity:
+- PREFERRED: When employees actually want to work (reduces availability violations)
+- MAX CAPACITY: Theoretical 24/7 availability (emergency capacity only)
+Focus on PREFERRED coverage for operational planning. Max capacity is strategic backup only.
+
 {skill_analysis_text}
 
 EXPERIENCE LEVEL COMPOSITION:
@@ -348,7 +366,7 @@ Paragraph 2 - SHIFT TIMING & AVAILABILITY ANALYSIS (4-5 sentences):
 Based on the shift-by-shift analysis above, which specific time blocks (morning/afternoon/evening/night) are adequately staffed vs understaffed? Focus on "scheduled vs needed" ratios for actual coverage. Also analyze the "available" numbers to identify strategic opportunities: which shifts have high employee availability (easy to fill) vs low availability (need hiring incentives)? For understaffed shifts, is the issue lack of available employees or poor scheduling efficiency? What operational changes could help (shift incentives for low-availability periods, better utilization of high-availability periods)?
 
 Paragraph 3 - SKILLS & EXPERIENCE COMPOSITION (4-5 sentences):
-Analyze the skill inventory with specific data. Quote exact coverage percentages from the analysis above (e.g., "Wound Care: X employees / Y shift-needs (Z% coverage)"). Identify the top 3 skill shortages and top 3 oversupplied skills with their specific numbers. For experience levels, use the qualified nurse counts (Level 3+ can work Level 1-2 assignments) and provide specific coverage ratios. Avoid vague terms like "significant shortages across all skills" - be precise about which skills are actually short vs adequate vs oversupplied. Should we retrain, reassign, or hire for specific skill gaps?
+Analyze the skill inventory with specific dual metrics data. Quote exact coverage percentages from the analysis above using the format "Skill: X preferred available-shifts / Y shift-needs (Z% coverage) | Max capacity: W shifts (V%)". The PREFERRED availability metrics are more important because they represent when employees actually want to work, leading to fewer availability violations. The MAX capacity shows theoretical 24/7 availability. For each skill, explain whether the preferred coverage is adequate (>100%) or if there are gaps requiring attention. For experience levels, use the qualified nurse counts (Level 3+ can work Level 1-2 assignments) and provide specific coverage ratios. Be precise about which skills have adequate preferred coverage vs those needing strategic hiring to match employee preferences with operational needs.
 
 Paragraph 4 - SPECIFIC HIRING RECOMMENDATIONS (4-6 action items):
 Provide concrete, prioritized hiring recommendations in this format:
@@ -373,10 +391,13 @@ FORMAT: Return your analysis as clean HTML with proper structure:
         content = response.content.strip()
         
         # Convert markdown-style headers to HTML with better styling
-        content = content.replace('**Paragraph 1 - EXECUTIVE SUMMARY**', '<h3 style="color: #2d3748; margin-top: 25px; margin-bottom: 15px;">📊 Executive Summary</h3>')
-        content = content.replace('**Paragraph 2 - SHIFT TIMING & AVAILABILITY ANALYSIS**', '<h3 style="color: #2d3748; margin-top: 25px; margin-bottom: 15px;">⏰ Shift Timing & Availability Analysis</h3>')
-        content = content.replace('**Paragraph 3 - SKILLS & EXPERIENCE COMPOSITION**', '<h3 style="color: #2d3748; margin-top: 25px; margin-bottom: 15px;">🎯 Skills & Experience Composition</h3>')
-        content = content.replace('**Paragraph 4 - SPECIFIC HIRING RECOMMENDATIONS**', '<h3 style="color: #2d3748; margin-top: 25px; margin-bottom: 15px;">📋 Specific Hiring Recommendations</h3>')
+        content = content.replace('**Executive Summary**', '<h3 style="color: #2d3748; margin-top: 25px; margin-bottom: 15px;">📊 Executive Summary</h3>')
+        content = content.replace('**Shift Timing & Availability Analysis**', '<h3 style="color: #2d3748; margin-top: 25px; margin-bottom: 15px;">⏰ Shift Timing & Availability Analysis</h3>')
+        content = content.replace('**Skills & Experience Composition**', '<h3 style="color: #2d3748; margin-top: 25px; margin-bottom: 15px;">🎯 Skills & Experience Composition</h3>')
+        content = content.replace('**Specific Hiring Recommendations**', '<h3 style="color: #2d3748; margin-top: 25px; margin-bottom: 15px;">📋 Specific Hiring Recommendations</h3>')
+        
+        # Also handle any other bold text patterns
+        content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', content)
         
         # Convert numbered lists to proper HTML
         import re
@@ -390,15 +411,20 @@ FORMAT: Return your analysis as clean HTML with proper structure:
                 if in_list:
                     formatted_lines.append('</ol>')
                     in_list = False
-                formatted_lines.append('')
+                # Skip adding empty lines to reduce spacing
                 continue
                 
-            # Check if line starts with a number (numbered list)
-            if re.match(r'^\d+\.', line):
+            # Check if line starts with a number (numbered list) or bullet point
+            if re.match(r'^\d+\.', line) or re.match(r'^\*\*\w+:\*\*', line):
                 if not in_list:
                     formatted_lines.append('<ol style="margin: 15px 0; padding-left: 20px;">')
                     in_list = True
-                formatted_lines.append(f'<li style="margin: 8px 0; line-height: 1.5;">{line[line.find(".")+1:].strip()}</li>')
+                # Extract content after number or format bold priorities
+                if re.match(r'^\d+\.', line):
+                    list_content = line[line.find(".")+1:].strip()
+                else:
+                    list_content = line
+                formatted_lines.append(f'<li style="margin: 8px 0; line-height: 1.5;">{list_content}</li>')
             else:
                 if in_list:
                     formatted_lines.append('</ol>')
@@ -413,13 +439,9 @@ FORMAT: Return your analysis as clean HTML with proper structure:
         
         content = '\n'.join(formatted_lines)
         
-        # Simple wrapper with clean styling
-        html_content = f"""<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; max-width: 900px; margin: 0 auto;">
-<h2 style="color: #1a202c; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 20px; font-size: 24px;">🤖 AI Staffing Analysis & Recommendations</h2>
-<div style="background: #f8f9fa; padding: 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+        # Simple wrapper with clean styling (no duplicate header since it's handled by the visualization)
+        html_content = f"""<div style="background: #f8f9fa; padding: 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;">
 {content}
-</div>
-<p style="text-align: center; color: #718096; font-size: 14px; margin-top: 15px; font-style: italic;">✨ Generated by AI during schedule optimization • Review recommendations with clinical leadership</p>
 </div>"""
         
         return html_content
