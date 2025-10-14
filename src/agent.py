@@ -1,8 +1,15 @@
 """
 Nursing Shift Scheduler Agent
 
-Uses LangChain + Google Gemini with 4 tools to optimize nursing schedules.
-Integrates with LangSmith for tracing and optimization.
+AI-powered scheduling system using LangChain + Google Gemini 2.5 Flash with 5 specialized tools:
+- Constraint validation (patient safety priorities)  
+- Schedule generation (greedy + iterative improvement)
+- Schedule comparison (violation-based optimization)
+- Staffing analysis (hiring recommendations with dual availability metrics)
+- Schedule scoring (cost, continuity, fairness objectives)
+
+Features comprehensive load balancing, consecutive shift limits, employee exclusions,
+skill/level coverage analysis, and AI-generated staffing narratives with violation severity classification.
 
 Run: python src/agent.py
 """
@@ -35,20 +42,20 @@ load_dotenv()
 
 
 class RateLimiter:
-    """Global rate limiter for API calls"""
+    """Rate limiter to stay under Google Gemini API limits (10 calls/minute)"""
     def __init__(self, calls_per_minute=9):
         self.calls_per_minute = calls_per_minute
         self.call_times = deque()
     
     def wait_if_needed(self):
-        """Wait if we're approaching rate limit"""
+        """Enforces rate limit by waiting when necessary to prevent API quota exceeded errors"""
         now = time.time()
         
-        # Remove calls older than 60 seconds
+        # Clear expired call timestamps (older than 60 seconds)
         while self.call_times and now - self.call_times[0] > 60:
             self.call_times.popleft()
         
-        # If we've made too many calls, wait
+        # Enforce rate limit by sleeping if we've hit the limit
         if len(self.call_times) >= self.calls_per_minute:
             sleep_time = 60 - (now - self.call_times[0]) + 1
             if sleep_time > 0:
@@ -56,13 +63,11 @@ class RateLimiter:
                 time.sleep(sleep_time)
                 self.call_times.clear()
         
-        # Record this call
         self.call_times.append(time.time())
 
 
-# Logging utility
 class TeeLogger:
-    """Logs to both console and file"""
+    """Dual output logger that writes to both console and log file simultaneously"""
     def __init__(self, filename):
         self.terminal = sys.stdout
         self.log = open(filename, 'w', encoding='utf-8')
@@ -81,8 +86,15 @@ class TeeLogger:
 
 def generate_staffing_narrative(violations, employees, patients, schedule):
     """
-    Generate a comprehensive natural language staffing analysis to save with the schedule.
-    This will be displayed in the visualization.
+    Generate AI-powered staffing analysis using Gemini 2.5 Flash for executive decision-making.
+    
+    Produces comprehensive 4-paragraph HTML report covering:
+    - Violation severity assessment (Critical/Moderate/Minor classification)
+    - Shift-by-shift supply vs demand analysis  
+    - Dual availability metrics (preferred vs maximum theoretical capacity)
+    - Specific hiring recommendations with priority levels
+    
+    Returns formatted HTML for visualization display.
     """
     try:
         api_key = os.getenv("GEMINI_API_KEY")
@@ -96,7 +108,7 @@ def generate_staffing_narrative(violations, employees, patients, schedule):
             google_api_key=api_key
         )
         
-        # ===== SHIFT TIMING ANALYSIS =====
+        # Extract violation counts by shift timing for operational insights
         shift_violations = defaultdict(int)
         shift_names = {
             0: "12am-4am (Night)",
@@ -113,7 +125,7 @@ def generate_staffing_narrative(violations, employees, patients, schedule):
                 shift_num = int(match.group(1))
                 shift_violations[shift_num] += 1
         
-        # ===== EMPLOYEE AVAILABILITY BY SHIFT =====
+        # Count total employee availability per shift (supply side analysis)
         employee_availability_by_shift = defaultdict(int)
         for emp in employees:
             for shift_id in emp.get('available_shifts', []):
@@ -121,7 +133,7 @@ def generate_staffing_narrative(violations, employees, patients, schedule):
                     shift_num = int(shift_id[4:])
                     employee_availability_by_shift[shift_num] += 1
         
-        # ===== PATIENT NEEDS BY SHIFT =====
+        # Count total patient care needs per shift (demand side analysis)
         patient_needs_by_shift = defaultdict(int)
         for patient in patients:
             for shift_id in patient.get('care_shifts', []):
@@ -129,14 +141,14 @@ def generate_staffing_narrative(violations, employees, patients, schedule):
                     shift_num = int(shift_id[4:])
                     patient_needs_by_shift[shift_num] += patient.get('nurses_needed', 1)
         
-        # ===== SHIFT SUPPLY/DEMAND ANALYSIS =====
+        # Generate shift-by-shift coverage analysis for executive summary
         shift_analysis = []
         for shift_num in range(6):
             available = employee_availability_by_shift[shift_num]
             needed = patient_needs_by_shift[shift_num]
             violations_count = shift_violations[shift_num]
             
-            # Calculate actual scheduled nurses for this shift
+            # Count nurses actually assigned (vs available or needed)
             scheduled = 0
             shift_prefix = f"S{shift_num}"
             for shift_id, patient_assignments in schedule.items():
@@ -156,15 +168,14 @@ def generate_staffing_narrative(violations, employees, patients, schedule):
         
         shift_analysis_text = '\n'.join(shift_analysis)
         
-        # ===== SKILL ANALYSIS =====
-        # Count available shifts by skill (preferred availability)
+        # Dual-metric skill coverage analysis: preferred vs theoretical maximum
         employee_skills_preferred = defaultdict(int)
         employee_skills_maximum = defaultdict(int)
         
         for emp in employees:
-            # Preferred availability (when they want to work)
+            # Preferred: actual employee availability (reduces scheduling conflicts)
             preferred_shifts_count = len(emp.get('available_shifts', []))
-            # Maximum availability (assuming 24/7 availability - 6 shifts per day * 28 days)
+            # Maximum: theoretical 24/7 capacity (emergency staffing reference)
             maximum_shifts_count = 6 * 28  # 168 total shifts per month
             
             for skill in emp.get('skills', []):
@@ -490,14 +501,17 @@ class CompareSchedulesInput(BaseModel):
 
 class NursingSchedulerAgent:
     """
-    Intelligent agent for nursing shift scheduling optimization.
+    AI-powered nursing scheduler with constraint-based optimization and iterative improvement.
     
-    Uses Google Gemini with 5 specialized tools:
-    1. Constraint Validator
-    2. Schedule Scorer  
-    3. Schedule Generator
-    4. Staffing Analyzer
-    5. Schedule Comparator
+    Architecture: 5 specialized tools orchestrated by Gemini 2.5 Flash
+    1. ConstraintValidator - Patient safety violations (CRITICAL) vs employee preferences (SOFT)
+    2. ScheduleScorer - Multi-objective optimization (cost, continuity, fairness, overtime)
+    3. ScheduleGenerator - Greedy heuristics + iterative refinement with load balancing
+    4. StaffingAnalyzer - Hiring recommendations with dual availability metrics
+    5. ScheduleComparator - Violation-prioritized schedule selection
+    
+    Features: Consecutive shift limits, employee exclusions, skill/level requirements,
+    expected vs max hours targeting, comprehensive violation severity classification.
     """
     
     def __init__(self, employees_file: str = "data/employees.json", 
@@ -518,7 +532,6 @@ class NursingSchedulerAgent:
         
         self.config = config
         
-        # Load data
         with open(employees_file, 'r') as f:
             self.employees = json.load(f)
         
@@ -549,13 +562,12 @@ class NursingSchedulerAgent:
             google_api_key=api_key
         )
         
-        # Create agent
         self.agent_executor = self._create_agent()
         
         # Store last generated schedule for reference
         self.last_schedule = None
         
-        # NEW: Track best schedule (patient=0, lowest employee violations)
+        # Track optimal schedule across iterations (prioritizes patient violations = 0)
         self.best_schedule = None
         self.best_patient_violations = 999
         self.best_employee_violations = 999
@@ -565,19 +577,16 @@ class NursingSchedulerAgent:
         
         def validate_schedule_tool(schedule: Optional[Union[Dict, str]] = None) -> str:
             """
-            Validates a nursing schedule against all hard constraints.
+            Comprehensive constraint validation with violation severity classification.
             
-            If no schedule provided, validates the last generated schedule.
+            CRITICAL violations (patient safety/legal compliance):
+            - Uncovered patient shifts, skill/level mismatches, safety exclusions
             
-            Checks:
-            - All patients have required coverage
-            - Nurses have required skills and levels
-            - Availability constraints respected
-            - Exclusion rules (employee-patient, employee-employee) followed
-            - Hour limits (min/max per week) satisfied
-            - Consecutive shift limits (max 3 in a row) respected
+            SOFT violations (operational optimization):
+            - Employee availability preferences, hour targets, consecutive shifts
             
-            Returns validation result with CRITICAL patient violations separated from employee violations.
+            Returns structured breakdown enabling prioritized iterative improvement.
+            Auto-tracks best schedule when patient violations reach zero.
             """
             self.rate_limiter.wait_if_needed()  # Rate limit API calls
             # Use last generated schedule if none provided
@@ -641,7 +650,7 @@ class NursingSchedulerAgent:
                 else:
                     priority_status = " | ✓ PERFECT SCHEDULE!"
                 
-                # NEW: Track best schedule
+                # Track optimal schedule when patient violations eliminated
                 if breakdown['patient'] == 0:
                     if self.best_schedule is None or breakdown['employee'] < self.best_employee_violations:
                         print(f"  ✨ NEW BEST: P=0, E={breakdown['employee']} (previous best: E={self.best_employee_violations})")
@@ -883,7 +892,6 @@ class NursingSchedulerAgent:
                         "note": f"Patient violations stuck at {old_patient_violations} - MUST continue iterating!"
                     })
         
-        # Create StructuredTools
         tools = [
             StructuredTool.from_function(
                 func=validate_schedule_tool,
@@ -1052,7 +1060,6 @@ FINAL REMINDER BEFORE RESPONDING TO USER:
             MessagesPlaceholder(variable_name="agent_scratchpad")
         ])
         
-        # Create agent
         agent = create_tool_calling_agent(self.llm, self.tools, prompt)
         
         # Create executor with minimal output to save tokens
@@ -1162,9 +1169,13 @@ FINAL REMINDER BEFORE RESPONDING TO USER:
 
 
 def main():
-    """Example usage"""
+    """
+    Complete nursing schedule generation workflow with AI analysis.
     
-    # Setup logging to file
+    Executes 4-phase optimization: Initial greedy generation, iterative improvement
+    for patient violation elimination, employee violation optimization, and final
+    scoring with AI-generated staffing narrative for executive decision-making.
+    """
     os.makedirs("logs", exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = f"logs/agent_run_{timestamp}.txt"
@@ -1172,12 +1183,10 @@ def main():
     sys.stdout = tee
     
     try:
-        # Initialize agent
         print("Initializing Nursing Scheduler Agent with Google Gemini...")
         print(f"Logging to: {log_file}")
         agent = NursingSchedulerAgent()
         
-        # Print summary
         stats = agent.get_summary_stats()
         print("\nData Summary:")
         print(f"  Employees: {stats['num_employees']}")
@@ -1187,7 +1196,6 @@ def main():
         print(f"  Availability ratio: {stats['availability_ratio']}x")
         print()
         
-        # Example queries
         queries = [
             "Create an optimal schedule for the nursing facility for the next month. Prioritize continuity of care.",
         ]
@@ -1219,7 +1227,6 @@ def main():
             
             score_result = agent.scorer.score(schedule_to_save)
             
-            # NEW: Generate staffing narrative
             staffing_narrative = generate_staffing_narrative(
                 violations, agent.employees, agent.patients, schedule_to_save
             )
@@ -1238,7 +1245,7 @@ def main():
                         'breakdown': breakdown
                     },
                     'score': score_result,
-                    'staffing_narrative': staffing_narrative  # NEW: Save the AI analysis
+                    'staffing_narrative': staffing_narrative
                 }, f, indent=2)
             print(f"✓ Schedule saved to: {schedule_file}")
             print(f"  Patient violations (CRITICAL): {breakdown['patient']}")

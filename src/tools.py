@@ -1,11 +1,16 @@
 """
-Nursing Shift Scheduler - Tool Implementations
+Nursing Shift Scheduler - Core Tool Implementations
 
-Four tools for constraint-based shift scheduling optimization:
-1. Constraint Validator
-2. Schedule Scorer
-3. Schedule Generator
-4. Staffing Analyzer
+Constraint-based optimization tools with patient safety prioritization:
+
+1. ConstraintValidator - Separates CRITICAL (patient safety) from SOFT (preferences) violations
+2. ScheduleScorer - Multi-objective optimization (cost, continuity, fairness, overtime) 
+3. ScheduleGenerator - Greedy + iterative improvement with load balancing and exclusion handling
+4. StaffingAnalyzer - Hiring recommendations based on violation patterns and utilization gaps
+5. ScheduleComparator - Violation-prioritized schedule selection (implemented in agent.py)
+
+Features: Consecutive shift enforcement, employee exclusions, expected vs max hours targeting,
+skill/level coverage analysis, and comprehensive violation severity classification.
 """
 
 from typing import Dict, List, Tuple, Optional
@@ -23,18 +28,15 @@ class ScheduleAssignment:
 
 class ConstraintValidator:
     """
-    Tool 1: Validates that a schedule satisfies all hard constraints.
+    Comprehensive constraint validation with violation severity prioritization.
     
-    Input:
-        - schedule: Dict[str, Dict[str, List[str]]]  
-          Format: {shift_id: {patient_id: [employee_ids]}}
-        - employees: List[Dict]
-        - patients: List[Dict]
+    CRITICAL violations (patient safety/legal - MUST be 0):
+    - Patient coverage gaps, skill mismatches, level requirements, safety exclusions
     
-    Output:
-        - valid: bool
-        - violations: List[str] (empty if valid)
-        - breakdown: Dict with patient vs employee violation counts
+    SOFT violations (operational preferences - optimize but acceptable):
+    - Employee availability, hour targets, consecutive shifts, load balancing
+    
+    Enables iterative improvement by separating life-safety issues from optimization targets.
     """
     
     def __init__(self, employees: List[Dict], patients: List[Dict]):
@@ -285,7 +287,15 @@ class ConstraintValidator:
 
 class ScheduleScorer:
     """
-    Tool 2: Scores a valid schedule on soft constraints (lower is better).
+    Multi-objective optimization scoring for valid schedules.
+    
+    Evaluates 4 key operational metrics (lower scores = better):
+    - Cost: Total labor expense (hours × pay rates)
+    - Continuity: Patient familiarity (fewer unique nurses per patient)  
+    - Fairness: Workload distribution equality (coefficient of variation)
+    - Overtime: Burnout prevention (penalty for >40h/week)
+    
+    Enables weighted optimization once patient safety constraints are satisfied.
     """
     
     def __init__(self, employees: List[Dict], patients: List[Dict]):
@@ -416,7 +426,15 @@ class ScheduleScorer:
 
 class ScheduleGenerator:
     """
-    Tool 3: Generates candidate schedules using heuristics.
+    Intelligent schedule generation with constraint-aware heuristics.
+    
+    Strategies:
+    - Greedy: Initial assignment targeting expected hours with load balancing
+    - Iterative: Violation-guided refinement with aggressive patient coverage prioritization
+    
+    Features: Employee exclusion enforcement, consecutive shift limits (max 3),
+    skill/level-aware team building, expected vs max hours optimization,
+    and emergency relaxation for critical patient coverage.
     """
     
     MAX_NURSES_PER_PATIENT = 3  # Cost control constraint
@@ -468,13 +486,12 @@ class ScheduleGenerator:
         patient_nurse_assignments = defaultdict(set)
         shift_employee_assignments = defaultdict(set)
         
-        # Calculate expected monthly hours for each employee
+        # Budget-based scheduling: Target expected_hours_per_week (not max) for load balancing
         employee_monthly_budget = {}
         for emp_id, emp in self.employees.items():
             expected_weekly = emp.get('expected_hours_per_week', emp.get('max_hours_per_week', 40))
             employee_monthly_budget[emp_id] = expected_weekly * 4  # 4 weeks
 
-        # Track how much budget is left
         employee_hours_remaining = {emp_id: budget for emp_id, budget in employee_monthly_budget.items()}
         
         # Get all patient shift requirements
@@ -494,13 +511,13 @@ class ScheduleGenerator:
         for shift_id in sorted(shifts_by_time.keys()):
             patients_needing_care = shifts_by_time[shift_id]
             
-            # Sort patients by difficulty (hardest first)
+            # Prioritize complex patients (harder to staff) to ensure coverage
             def patient_difficulty(patient_id):
                 patient = self.patients[patient_id]
                 return (
-                    -patient.get('min_level', 1),
-                    -len(patient.get('required_skills', [])),
-                    -patient.get('nurses_needed', 1)
+                    -patient.get('min_level', 1),           # Higher level requirements first
+                    -len(patient.get('required_skills', [])),  # More skills needed first
+                    -patient.get('nurses_needed', 1)       # More nurses needed first
                 )
             
             patients_needing_care.sort(key=patient_difficulty)
@@ -673,7 +690,7 @@ class ScheduleGenerator:
             if shift_assignments:
                 schedule[shift_id] = shift_assignments
         
-        # NEW: Final validation - log budget utilization success
+        # Budget utilization analysis for load balancing assessment
         total_monthly_budget = sum(emp['max_hours_per_week'] * 4 for emp in self.employees.values())
         total_hours_used = sum(employee_hours.values())
         budget_utilization = (total_hours_used / total_monthly_budget) * 100
@@ -704,19 +721,25 @@ class ScheduleGenerator:
                           employee_hours: Dict, patient_nurse_assignments: Dict,
                           employee_hours_by_week: Dict = None,
                           already_assigned_to_patient: List[str] = None) -> tuple:
-        """Calculate priority score for employee assignment."""
+        """
+        Multi-factor priority calculation for optimal employee assignment.
+        
+        Balances: load distribution (target expected hours), skill efficiency,
+        cost optimization, continuity of care, and overwork prevention.
+        Returns tuple for sorting (lower = higher priority).
+        """
         emp = self.employees[emp_id]
         patient_id = patient['patient_id']
         patient_min_level = patient.get('min_level', 1)
         patient_required_skills = set(patient.get('required_skills', []))
         
-        # NEW: Calculate weekly imbalance penalty
+        # Weekly distribution smoothing (prevents cramming hours into few weeks)
         if employee_hours_by_week:
             weeks_hours = [employee_hours_by_week[emp_id][w] for w in range(4)]
             if weeks_hours and any(h > 0 for h in weeks_hours):
                 avg_week = sum(weeks_hours) / 4
                 max_deviation = max(abs(h - avg_week) for h in weeks_hours)
-                weekly_imbalance_penalty = max_deviation * 2  # Penalize uneven distribution
+                weekly_imbalance_penalty = max_deviation * 2
             else:
                 weekly_imbalance_penalty = 0
         else:
@@ -737,7 +760,7 @@ class ScheduleGenerator:
         budget_used_ratio = hours_worked / monthly_budget if monthly_budget > 0 else 0
         approaching_max_ratio = hours_worked / max_monthly if max_monthly > 0 else 0
 
-        # LOAD BALANCING: Target expected_hours_per_week, respect min/max bounds
+        # Load balancing strategy: Target expected hours, not max hours (prevents overwork)  
         max_weekly = emp.get('max_hours_per_week', 40)
         expected_weekly = emp.get('expected_hours_per_week', max_weekly)
         min_weekly = emp.get('min_hours_per_week', expected_weekly * 0.8)
@@ -772,7 +795,7 @@ class ScheduleGenerator:
             # Close to expected hours - minimal penalty
             overwork_penalty = abs(hours_from_expected) * 50
         
-        # NEW: Calculate skill efficiency when building a TEAM
+        # Team composition optimization: avoid skill duplication and waste
         skill_waste_penalty = 0
         skill_duplication_penalty = 0
         
@@ -896,8 +919,7 @@ class ScheduleGenerator:
                 print(f"🚨 Emergency override activated for shift {shift_id}: using {len(emergency_eligible)} near-max employees")
                 eligible = emergency_eligible
         
-        # NEW: Boost underutilized employees to front of list
-        # This ensures they get considered before overworked employees
+        # Prioritize underutilized employees for load balancing
         eligible_with_hours = [(emp_id, employee_hours.get(emp_id, 0)) for emp_id in eligible]
         eligible_with_hours.sort(key=lambda x: x[1])  # Sort by hours worked (ascending)
         eligible = [emp_id for emp_id, _ in eligible_with_hours]
@@ -1505,7 +1527,13 @@ class ScheduleGenerator:
 
 class StaffingAnalyzer:
     """
-    Tool 4: Analyzes staffing needs and suggests hiring/termination recommendations.
+    Strategic workforce planning based on violation patterns and utilization analysis.
+    
+    Identifies hiring needs from critical coverage gaps and skill mismatches.
+    Detects termination candidates from chronic underutilization.
+    Provides prioritized recommendations with specific shift timing and skill requirements.
+    
+    Supports data-driven staffing decisions aligned with operational needs.
     """
     
     def __init__(self, employees: List[Dict], patients: List[Dict]):
