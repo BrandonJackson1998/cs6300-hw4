@@ -38,6 +38,29 @@ python3 --version
      LANGCHAIN_API_KEY=your_api_key
      ```
 
+## Setup
+
+1. **Create a virtual environment**
+
+Mac:
+```bash
+make .virtual_environment
+source .virtual_environment/bin/activate
+```
+
+2. **Install dependencies**
+
+On Mac:
+```bash
+make install-mac
+```
+
+On Linux (teacher's original setup):
+```bash
+make install
+```
+
+---
 
 ### Generate Test Data
 ```bash
